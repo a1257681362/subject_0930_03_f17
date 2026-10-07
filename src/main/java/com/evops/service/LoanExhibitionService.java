@@ -9,12 +9,14 @@ import com.evops.dto.AnomalyResolveRequest;
 import com.evops.dto.EscortNodeRequest;
 import com.evops.dto.ReturnCheckItemDto;
 import com.evops.dto.ReturnCheckRequest;
+import com.evops.dto.ReturnCheckSuppRequest;
 import com.evops.entity.EscortNode;
 import com.evops.entity.LoanAgreement;
 import com.evops.entity.LoanAgreementVersion;
 import com.evops.entity.LoanManifestLine;
 import com.evops.entity.LoanReturnCheck;
 import com.evops.entity.LoanReturnCheckLine;
+import com.evops.entity.LoanReturnCheckSupp;
 import com.evops.entity.Relic;
 import com.evops.entity.RelicLoan;
 import com.evops.entity.RepairProject;
@@ -24,8 +26,10 @@ import com.evops.mapper.LoanAgreementVersionMapper;
 import com.evops.mapper.LoanManifestLineMapper;
 import com.evops.mapper.LoanReturnCheckLineMapper;
 import com.evops.mapper.LoanReturnCheckMapper;
+import com.evops.mapper.LoanReturnCheckSuppMapper;
 import com.evops.mapper.RelicLoanMapper;
 import com.evops.mapper.RepairProjectMapper;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -72,6 +76,7 @@ public class LoanExhibitionService {
     private final EscortNodeMapper nodeMapper;
     private final LoanReturnCheckMapper checkMapper;
     private final LoanReturnCheckLineMapper checkLineMapper;
+    private final LoanReturnCheckSuppMapper checkSuppMapper;
     private final RelicLoanMapper relicLoanMapper;
     private final RepairProjectMapper projectMapper;
     private final RelicService relicService;
@@ -84,6 +89,7 @@ public class LoanExhibitionService {
                                  EscortNodeMapper nodeMapper,
                                  LoanReturnCheckMapper checkMapper,
                                  LoanReturnCheckLineMapper checkLineMapper,
+                                 LoanReturnCheckSuppMapper checkSuppMapper,
                                  RelicLoanMapper relicLoanMapper,
                                  RepairProjectMapper projectMapper,
                                  RelicService relicService,
@@ -95,6 +101,7 @@ public class LoanExhibitionService {
         this.nodeMapper = nodeMapper;
         this.checkMapper = checkMapper;
         this.checkLineMapper = checkLineMapper;
+        this.checkSuppMapper = checkSuppMapper;
         this.relicLoanMapper = relicLoanMapper;
         this.projectMapper = projectMapper;
         this.relicService = relicService;
@@ -173,7 +180,7 @@ public class LoanExhibitionService {
      */
     @Transactional
     public LoanAgreementVersion sign(Long agreementId, AgreementSignRequest req) {
-        LoanAgreement agreement = requireAgreement(agreementId);
+        LoanAgreement agreement = requireAgreementLocked(agreementId);
         if (AGR_RETURNED.equals(agreement.getStatus()) || AGR_CANCELLED.equals(agreement.getStatus())) {
             throw new IllegalArgumentException("协议已闭环，不能再签署: " + agreement.getAgreementNo());
         }
@@ -222,7 +229,7 @@ public class LoanExhibitionService {
      */
     @Transactional
     public LoanAgreementVersion amend(Long agreementId, AgreementAmendRequest req) {
-        LoanAgreement agreement = requireAgreement(agreementId);
+        LoanAgreement agreement = requireAgreementLocked(agreementId);
         if (AGR_RETURNED.equals(agreement.getStatus()) || AGR_CANCELLED.equals(agreement.getStatus())) {
             throw new IllegalArgumentException("协议已闭环，不能变更: " + agreement.getAgreementNo());
         }
@@ -290,7 +297,7 @@ public class LoanExhibitionService {
      */
     @Transactional
     public EscortNode registerNode(Long agreementId, EscortNodeRequest req) {
-        LoanAgreement agreement = requireAgreement(agreementId);
+        LoanAgreement agreement = requireAgreementLocked(agreementId);
         if (!AGR_SIGNED.equals(agreement.getStatus())
                 && !AGR_IN_TRANSIT.equals(agreement.getStatus())) {
             throw new IllegalArgumentException("协议未签署或已闭环，不能登记押运节点: "
@@ -417,12 +424,27 @@ public class LoanExhibitionService {
     /**
      * 归还验收：开箱完成且异常全部解除后，按封箱出库时签署版本的原借展清单
      * 逐项比对，漏项/多项/重复均拒绝；差异逐行保留，闭环协议并同步归还 t_relic_loan。
+     *
+     * 并发与回执口径（状态转换的唯一入口）：
+     * 1) 先对协议行加排他行锁，同一协议的并发验收在此串行；
+     * 2) 锁内回读已完成验收：同一验收单号的重复回执命中原验收原样返回（幂等回放，
+     *    不重复执行、不二次闭环），不同单号拒绝重复验收；
+     * 3) 验收闭环 = 协议 RETURNED + 贯通借出单 RETURNED，同一事务原子提交，
+     *    外借清单（t_relic_loan LENT 口径）随即不再包含该文物；
+     * 4) 唯一约束（uk_loan_return_check_agr/no）兜底：被并发击穿时转成业务拒绝，
+     *    绝不冒出与文物/项目编号无关的通用编号冲突。
      */
     @Transactional
     public LoanReturnCheck returnCheck(Long agreementId, ReturnCheckRequest req) {
-        LoanAgreement agreement = requireAgreement(agreementId);
-        if (checkMapper.selectCount(new LambdaQueryWrapper<LoanReturnCheck>()
-                .eq(LoanReturnCheck::getAgreementId, agreementId)) > 0) {
+        // 协议行锁 + 锁内重读：并发验收串行化，重复回执/落败请求看到最终状态
+        LoanAgreement agreement = requireAgreementLocked(agreementId);
+
+        LoanReturnCheck existing = checkOfAgreement(agreementId);
+        if (existing != null) {
+            if (existing.getCheckNo().equals(req.getCheckNo())) {
+                // 重复回执：同一验收单号命中同一验收，原样回放，不重复闭环
+                return existing;
+            }
             throw new IllegalArgumentException("该协议已完成归还验收，不能重复验收: "
                     + agreement.getAgreementNo());
         }
@@ -496,7 +518,18 @@ public class LoanExhibitionService {
         check.setCheckedAt(now);
         check.setConclusion(withDiff ? CHECK_WITH_DIFF : CHECK_ALL_MATCH);
         check.setSummary(req.getSummary());
-        checkMapper.insert(check);
+        try {
+            checkMapper.insert(check);
+        } catch (DuplicateKeyException dup) {
+            // 唯一约束兜底（行锁之外的极端竞态）：同协议同单号按重复回执幂等回放；
+            // 同协议不同单号为重复验收、跨协议同单号为单号冲突，按业务口径拒绝。
+            // H2 约束冲突只回滚当前语句，事务可继续读；拒绝路径随异常整体回滚。
+            LoanReturnCheck winner = checkOfAgreement(agreementId);
+            if (winner != null && winner.getCheckNo().equals(req.getCheckNo())) {
+                return winner;
+            }
+            throw duplicateCheck(agreementId, req.getCheckNo());
+        }
 
         for (ReturnCheckItemDto item : req.getItems()) {
             LoanManifestLine line = manifestById.get(item.getManifestLineId());
@@ -525,6 +558,88 @@ public class LoanExhibitionService {
         return check;
     }
 
+    /**
+     * 归还验收差异补录：验收闭环后复查发现的差异只追加登记，不改写原比对行。
+     * 口径：
+     * 1) 仅协议已归还验收（RETURNED 且验收记录存在）可补录；
+     * 2) 补录目标必须是验收时逐项比对过的清单行，类型只能 DAMAGED/MISSING，差异说明必填；
+     * 3) 完全相同的补录（同清单行、同类型、同说明）拒绝重复登记；
+     * 4) 首条补录把验收结论 ALL_MATCH 更正为 WITH_DIFF；
+     *    补录只追加差异——协议保持 RETURNED、贯通借出单保持 RETURNED，
+     *    绝不重新打开已完成归还。
+     */
+    @Transactional
+    public LoanReturnCheckSupp supplementReturnDiff(Long agreementId, ReturnCheckSuppRequest req) {
+        // 协议行锁 + 锁内重读：补录与验收/并发补录串行，结论更正只在首条补录发生一次
+        LoanAgreement agreement = requireAgreementLocked(agreementId);
+        if (!AGR_RETURNED.equals(agreement.getStatus())) {
+            throw new IllegalArgumentException("协议未完成归还验收，不能补录差异: "
+                    + agreement.getAgreementNo() + "（" + agreement.getStatus() + "）");
+        }
+        LoanReturnCheck check = checkOfAgreement(agreementId);
+        if (check == null) {
+            throw new IllegalArgumentException("协议缺少归还验收记录，不能补录差异: "
+                    + agreement.getAgreementNo());
+        }
+        // 补录目标必须是验收时逐项比对过的清单行
+        LoanReturnCheckLine target = checkLineMapper.selectList(new LambdaQueryWrapper<LoanReturnCheckLine>()
+                        .eq(LoanReturnCheckLine::getCheckId, check.getId()))
+                .stream()
+                .filter(l -> l.getManifestLineId().equals(req.getManifestLineId()))
+                .findFirst().orElse(null);
+        if (target == null) {
+            throw new IllegalArgumentException("补录行不属于原验收比对清单: id=" + req.getManifestLineId());
+        }
+        if (!LINE_DAMAGED.equals(req.getResult()) && !LINE_MISSING.equals(req.getResult())) {
+            throw new IllegalArgumentException("补录差异类型只能为 DAMAGED/MISSING");
+        }
+        if (req.getDiffNote() == null || req.getDiffNote().trim().isEmpty()) {
+            throw new IllegalArgumentException("补录差异必须填写差异说明");
+        }
+        Long dup = checkSuppMapper.selectCount(new LambdaQueryWrapper<LoanReturnCheckSupp>()
+                .eq(LoanReturnCheckSupp::getCheckId, check.getId())
+                .eq(LoanReturnCheckSupp::getManifestLineId, req.getManifestLineId())
+                .eq(LoanReturnCheckSupp::getResult, req.getResult())
+                .eq(LoanReturnCheckSupp::getDiffNote, req.getDiffNote().trim()));
+        if (dup != null && dup > 0) {
+            throw new IllegalArgumentException("该差异已补录登记，不能重复补录: " + target.getItemNo());
+        }
+
+        LocalDateTime now = req.getSupplementedAt() == null ? LocalDateTime.now() : req.getSupplementedAt();
+        LoanReturnCheckSupp supp = new LoanReturnCheckSupp();
+        supp.setCheckId(check.getId());
+        supp.setManifestLineId(target.getManifestLineId());
+        supp.setItemNo(target.getItemNo());
+        supp.setItemName(target.getItemName());
+        supp.setQty(target.getQty());
+        supp.setResult(req.getResult());
+        supp.setDiffNote(req.getDiffNote().trim());
+        supp.setSupplementedBy(req.getSupplementedBy().trim());
+        supp.setSupplementedAt(now);
+        checkSuppMapper.insert(supp);
+
+        // 首条补录把验收结论更正为 WITH_DIFF（原比对行不改写）
+        if (CHECK_ALL_MATCH.equals(check.getConclusion())) {
+            check.setConclusion(CHECK_WITH_DIFF);
+            checkMapper.updateById(check);
+        }
+
+        ledgerService.append(agreement.getRelicId(), null, null,
+                ACTION_LOAN_RETURN_CHECK_SUPP, agreement.getAgreementNo(),
+                "归还验收差异补录（" + check.getCheckNo() + "）：条目「" + target.getItemName()
+                        + "」" + req.getResult() + "，差异说明：" + supp.getDiffNote()
+                        + "，补录人：" + supp.getSupplementedBy()
+                        + "；协议保持已归还，不重新打开", now);
+        return supp;
+    }
+
+    /** 验收差异补录列表（随验收记录只追加） */
+    public List<LoanReturnCheckSupp> listCheckSupplements(Long checkId) {
+        return checkSuppMapper.selectList(new LambdaQueryWrapper<LoanReturnCheckSupp>()
+                .eq(LoanReturnCheckSupp::getCheckId, checkId)
+                .orderByAsc(LoanReturnCheckSupp::getId));
+    }
+
     // ------------------------------------------------------------------
     // 查询与修复侧反查
     // ------------------------------------------------------------------
@@ -535,6 +650,17 @@ public class LoanExhibitionService {
             throw new IllegalArgumentException("借展协议不存在: id=" + id);
         }
         return agreement;
+    }
+
+    /**
+     * 协议状态变更的统一入口：先加协议行锁，再在锁内重读。
+     * 签署/变更/节点/验收/补录全部经此拿到已提交的最新状态做校验与写入，
+     * 并发下不会用过期实体把已闭环协议写回在途（已完成归还不能被重新打开）。
+     */
+    private LoanAgreement requireAgreementLocked(Long id) {
+        requireAgreement(id);
+        agreementMapper.lockRow(id);
+        return agreementMapper.selectById(id);
     }
 
     public List<LoanAgreement> list(Long relicId, String status) {
@@ -573,6 +699,7 @@ public class LoanExhibitionService {
             checkBundle.put("lines", checkLineMapper.selectList(new LambdaQueryWrapper<LoanReturnCheckLine>()
                     .eq(LoanReturnCheckLine::getCheckId, check.getId())
                     .orderByAsc(LoanReturnCheckLine::getId)));
+            checkBundle.put("supplements", listCheckSupplements(check.getId()));
             detail.put("returnCheck", checkBundle);
         } else {
             detail.put("returnCheck", null);
@@ -621,6 +748,7 @@ public class LoanExhibitionService {
                         new LambdaQueryWrapper<LoanReturnCheckLine>()
                                 .eq(LoanReturnCheckLine::getCheckId, check.getId())
                                 .ne(LoanReturnCheckLine::getResult, LINE_INTACT)));
+                checkBundle.put("supplements", listCheckSupplements(check.getId()));
                 trace.put("returnCheck", checkBundle);
             } else {
                 trace.put("returnCheck", null);
@@ -693,6 +821,21 @@ public class LoanExhibitionService {
     private boolean checkNoExists(String checkNo) {
         return checkMapper.selectCount(new LambdaQueryWrapper<LoanReturnCheck>()
                 .eq(LoanReturnCheck::getCheckNo, checkNo)) > 0;
+    }
+
+    /** 协议的归还验收记录（一协议一条，无则 null） */
+    private LoanReturnCheck checkOfAgreement(Long agreementId) {
+        return checkMapper.selectOne(new LambdaQueryWrapper<LoanReturnCheck>()
+                .eq(LoanReturnCheck::getAgreementId, agreementId)
+                .last("LIMIT 1"));
+    }
+
+    /** 唯一约束被击穿时按业务口径归类：同协议为重复验收，跨协议为验收单号冲突 */
+    private IllegalArgumentException duplicateCheck(Long agreementId, String checkNo) {
+        if (checkOfAgreement(agreementId) != null) {
+            return new IllegalArgumentException("该协议已完成归还验收，不能重复验收");
+        }
+        return new IllegalArgumentException("验收单号已存在: " + checkNo);
     }
 
     private LoanAgreementVersion requireVersion(Long versionId) {

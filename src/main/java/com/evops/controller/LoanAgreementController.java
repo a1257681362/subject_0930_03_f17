@@ -7,10 +7,12 @@ import com.evops.dto.AgreementSignRequest;
 import com.evops.dto.AnomalyResolveRequest;
 import com.evops.dto.EscortNodeRequest;
 import com.evops.dto.ReturnCheckRequest;
+import com.evops.dto.ReturnCheckSuppRequest;
 import com.evops.entity.EscortNode;
 import com.evops.entity.LoanAgreement;
 import com.evops.entity.LoanAgreementVersion;
 import com.evops.entity.LoanReturnCheck;
+import com.evops.entity.LoanReturnCheckSupp;
 import com.evops.service.LoanExhibitionService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -96,10 +98,18 @@ public class LoanAgreementController {
         return ApiResponse.ok(loanExhibitionService.resolveAnomaly(nodeId, request));
     }
 
-    /** 归还验收：与原借展清单逐项比对，差异逐行保留 */
+    /** 归还验收：与原借展清单逐项比对，差异逐行保留；同一验收单号重复回执幂等回放 */
     @PostMapping("/loan-agreements/{id}/return-check")
     public ApiResponse<LoanReturnCheck> returnCheck(@PathVariable Long id,
                                                     @Valid @RequestBody ReturnCheckRequest request) {
         return ApiResponse.ok(loanExhibitionService.returnCheck(id, request));
+    }
+
+    /** 归还验收差异补录：只追加差异，不重新打开已完成归还 */
+    @PostMapping("/loan-agreements/{id}/return-check/supplements")
+    public ApiResponse<LoanReturnCheckSupp> supplementReturnDiff(
+            @PathVariable Long id,
+            @Valid @RequestBody ReturnCheckSuppRequest request) {
+        return ApiResponse.ok(loanExhibitionService.supplementReturnDiff(id, request));
     }
 }

@@ -1,6 +1,7 @@
 package com.evops.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.evops.common.RepairInputException;
 import com.evops.dto.AcceptRequest;
 import com.evops.dto.CancelRequest;
 import com.evops.dto.StageRequest;
@@ -33,6 +34,8 @@ import static com.evops.constant.MuseumConstants.*;
  *   <li>状态已不允许（说明并发对端已先行生效）则业务事务整体回滚，
  *       在独立事务补写一条 REJECTED 尝试并指向最终生效尝试，
  *       同时落 REPAIR_OP_REJECT 台账——谁生效、谁被拒绝逐条可溯。</li>
+ *   <li>输入缺项/参数非法（{@link RepairInputException}）不属于并发落败：
+ *       不写 REJECTED 尝试、不消耗流水号，调用方补齐字段后同号只重试当前步骤。</li>
  * </ol>
  *
  * <p>原有 {@link RepairService} 的业务规则（会签、外借、阶段数、验收补偿等）
@@ -153,7 +156,17 @@ public class RepairOperationService {
                 return Outcome.success(biz, attempt);
             });
             outcome = executed;
+        } catch (RepairInputException e) {
+            // 输入缺项/参数非法：业务事务已回滚。不写 REJECTED 尝试、不消耗请求流水号——
+            // 调用方按错误信息补齐关键字段后，可用同一流水号只重试当前步骤。
+            throw e;
         } catch (IllegalArgumentException e) {
+            // 锁内回读极端竞态的兜底：同一流水号此时已有生效/被拒尝试（并发对端已落账），
+            // 按幂等口径回放同一次尝试，不重复写 REJECTED、不上抛与并发事实不符的错误
+            RepairOperationAttempt raced = findByRequestNo(requestNo);
+            if (raced != null) {
+                return replay(raced);
+            }
             // 业务事务已回滚：在独立事务补写 REJECTED 审计与台账后，原样抛出业务错误
             auditService.recordRejected(projectId, operation, requestNo,
                     operatorName, e.getMessage());

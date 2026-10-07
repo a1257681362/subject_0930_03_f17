@@ -49,6 +49,7 @@
 | `t_loan_manifest_line` | 借展清单：随协议版本固化的出库清单快照，归还验收按出库版本清单逐项比对 |
 | `t_loan_escort_node` | 押运节点：封箱/交接/到馆/开箱四类唯一、按序登记，异常暂停、开箱双人见证 |
 | `t_loan_return_check` / `t_loan_return_check_line` | 归还验收头与逐行比对（相符/损伤/缺失），差异永久保留，一协议一条验收 |
+| `t_loan_return_check_supp` | 归还验收差异补录：验收闭环后复查发现的差异只追加，不重开已完成归还 |
 | `t_pest_rule_version` / `t_pest_rule_item` | 虫种阈值规则版本与条目：发布新版本旧版本置 `SUPERSEDED` 只追加，监测记录旧结论不改写 |
 | `t_pest_trap_point` / `t_pest_point_move` | 展厅/库房诱捕点位（编号/布放日期/坐标/责任区域）与迁移记录（前后坐标只追加） |
 | `t_pest_trap_card` | 诱捕片：更换只置 `REPLACED`，旧片与旧监测记录永不删除 |
@@ -318,6 +319,16 @@ mvn test
   漏项/多项/重复均拒绝；每行给 `INTACT 相符 / DAMAGED 损伤 / MISSING 缺失`，
   非相符行必须填差异说明；结论全部相符 `ALL_MATCH`，否则 `WITH_DIFF`，差异逐行永久保留；
   验收闭环后协议置 `RETURNED`，贯通借出记录同步归还。
+- **验收并发与回执口径**：归还验收先对协议行加排他行锁串行化；同一验收单号的**重复回执**
+  命中原验收幂等回放（不二次闭环），不同单号拒绝重复验收；并发验收恰一个生效，
+  落败请求按业务口径拒绝（唯一约束兜底，绝不上抛通用编号冲突）。
+- **差异补录不重开归还**：验收闭环后复查发现的差异经
+  `POST /api/loan-agreements/{id}/return-check/supplements` 只追加登记（原比对行不改写），
+  首条补录把结论 `ALL_MATCH` 更正为 `WITH_DIFF`；补录全程协议保持 `RETURNED`、
+  贯通借出单保持 `RETURNED`，**绝不重新打开已完成归还**。
+- **外借清单同一状态源**：`GET /api/loans` 与 `GET /api/loans/export` 共用同一行集
+  （`t_relic_loan` 为唯一状态源，`status=LENT` 即在借清单）；归还验收闭环后文物随即
+  从在借清单的查询与导出中同步消失。
 - **修复侧反查**：`GET /api/loan-agreements/trace?projectId=` 由修复项目经文物反查借展原单，
   返回原单号、当前版本、借展方/保险金额/路线/归还日期、四节点处理人及**异常原因/解除人**、验收差异。
 - 协议登记/签署/变更、节点登记/异常/解除、归还验收全部追加写入 `t_relic_ledger` 留痕。
@@ -333,8 +344,11 @@ mvn test
 | `POST /api/loan-agreements/{id}/amend` | 协议变更，生成待签新版本（已签内容不覆盖） |
 | `POST /api/loan-agreements/{id}/escort-nodes` | 登记押运节点（封箱/交接/到馆/开箱；异常暂停、开箱双人见证） |
 | `POST /api/escort-nodes/{nodeId}/resolve` | 押运异常解除，后续节点恢复 |
-| `POST /api/loan-agreements/{id}/return-check` | 归还验收（与原清单逐项比对，差异保留） |
-| `GET  /api/loan-agreements/trace?projectId=` | 修复侧反查：原单、节点处理人、异常原因与验收差异 |
+| `POST /api/loan-agreements/{id}/return-check` | 归还验收（与原清单逐项比对，差异保留；同号重复回执幂等回放） |
+| `POST /api/loan-agreements/{id}/return-check/supplements` | 归还验收差异补录（只追加，不重开已完成归还） |
+| `GET  /api/loans?relicId=&status=` | 外借清单查询（`status=LENT` 即在借），与导出同一行集 |
+| `GET  /api/loans/export?relicId=&status=` | 外借清单 CSV 导出（与查询同一状态源） |
+| `GET  /api/loan-agreements/trace?projectId=` | 修复侧反查：原单、节点处理人、异常原因与验收差异（含补录） |
 
 ### 测试
 
@@ -343,6 +357,11 @@ mvn test
 开箱单人/同名见证人拒绝、两名不同见证人通过；归还验收漏项/多项拒绝、损伤与缺失差异逐行保留、
 贯通借出记录同步归还；修复项目反查定位原单与异常原因；在途期间修复开工与文物撤销被拦截；
 台账动作链完整可追溯。
+
+`LoanReturnCheckConcurrencyTest`（独立内存库）覆盖：同一验收单号重复回执幂等回放、不同单号拒绝；
+8 并发验收恰 1 生效且落败口径一致；8 并发同一单号全部回放同一验收；差异补录只追加、
+结论更正为 `WITH_DIFF` 且协议/贯通借出单保持 `RETURNED` 不重开；外借清单查询与 CSV 导出
+同一状态源（在借/全量/按文物三口径一致）。
 
 ## 文物库房库位与密集架预约（museum-7）
 
@@ -670,6 +689,10 @@ CONDITIONAL 必带合法等级、无借阅/已批准待出库 RECALL/已归还 S
 - **请求流水号幂等**：`request_no` 全表稀疏唯一。修复侧补传/补录/重试复用同一流水号，
   锁前快查、锁内二次回读，命中同一次尝试即回放原结果（生效回放业务结果，被拒回放
   原拒绝原因），绝不二次执行、绝不产生第二条尝试。
+- **输入缺项不烧流水号**：修复输入缺少关键字段或码值非法（如 `CONDITIONAL` 缺
+  `gradeAfter`、结论/等级码值越界）抛 `RepairInputException`，错误**指明缺项字段**；
+  此类输入问题不属于并发落败——不写 `REJECTED` 尝试、不消耗流水号，调用方补齐后
+  用同一流水号**只重试当前步骤**即可生效；状态冲突仍按原口径写 `REJECTED` 审计。
 
 ### 鉴定与并发接口
 
@@ -700,6 +723,10 @@ CONDITIONAL 必带合法等级、无借阅/已批准待出库 RECALL/已归还 S
 8 并发阶段登记全部生效阶段号 1..8、8 并发修复完成恰 1 生效 7 拒绝且被拒记录指向
 同一胜出尝试、7 条 `REPAIR_OP_REJECT` 台账均写明最终生效尝试、胜出流水号重放不二次执行、
 8 并发同一流水号开工只形成一条生效尝试。
+
+`RepairOperationInputRetryTest`（独立内存库）覆盖：验收缺 `gradeAfter` 指明缺项字段且不写
+尝试、补齐后同一流水号重试只执行当前步骤并生效、同号再提幂等回放、非法结论/等级码值与
+bean 校验缺项均指明字段且不烧流水号、状态冲突仍落 `REJECTED` 审计。
 
 ## 展览借品清点盘点（museum-12）
 
