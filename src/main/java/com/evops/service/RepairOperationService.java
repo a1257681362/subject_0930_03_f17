@@ -1,6 +1,7 @@
 package com.evops.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.evops.common.InvalidRepairInputException;
 import com.evops.dto.AcceptRequest;
 import com.evops.dto.CancelRequest;
 import com.evops.dto.StageRequest;
@@ -28,6 +29,8 @@ import static com.evops.constant.MuseumConstants.*;
  * <ol>
  *   <li>对项目行加排他行锁，把并发请求串行化；</li>
  *   <li>锁内先凭请求流水号幂等回读（补传/重试/补录命中同一次尝试，不重复执行）；</li>
+ *   <li>输入缺项/不合法（{@link com.evops.common.InvalidRepairInputException}）不属于并发冲突：
+ *       不落 REJECTED 审计、不占用流水号，补齐缺项后同一流水号只重试当前步骤；</li>
  *   <li>状态仍允许则执行业务，并在<b>同一事务</b>写一条 EFFECTIVE 尝试，
  *       与项目状态推进原子提交；</li>
  *   <li>状态已不允许（说明并发对端已先行生效）则业务事务整体回滚，
@@ -153,6 +156,10 @@ public class RepairOperationService {
                 return Outcome.success(biz, attempt);
             });
             outcome = executed;
+        } catch (InvalidRepairInputException e) {
+            // 输入缺项/不合法：业务事务已回滚，但不属于并发冲突——不落 REJECTED 审计、
+            // 不占用请求流水号；调用方补齐缺项后用同一流水号只重试当前步骤
+            throw e;
         } catch (IllegalArgumentException e) {
             // 业务事务已回滚：在独立事务补写 REJECTED 审计与台账后，原样抛出业务错误
             auditService.recordRejected(projectId, operation, requestNo,

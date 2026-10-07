@@ -48,7 +48,7 @@
 | `t_loan_agreement` / `t_loan_agreement_version` | 借展协议主单与版本：借展方/保险金额/运输路线/归还日期随版本固化，变更只追加新版本，已签版本置 `SUPERSEDED` 不覆盖 |
 | `t_loan_manifest_line` | 借展清单：随协议版本固化的出库清单快照，归还验收按出库版本清单逐项比对 |
 | `t_loan_escort_node` | 押运节点：封箱/交接/到馆/开箱四类唯一、按序登记，异常暂停、开箱双人见证 |
-| `t_loan_return_check` / `t_loan_return_check_line` | 归还验收头与逐行比对（相符/损伤/缺失），差异永久保留，一协议一条验收 |
+| `t_loan_return_check` / `t_loan_return_check_line` | 归还验收头与逐行比对（相符/损伤/缺失），差异永久保留，一协议一条验收；`line_seq>0` 为验收闭环后的差异补录行（只追加，不重开归还） |
 | `t_pest_rule_version` / `t_pest_rule_item` | 虫种阈值规则版本与条目：发布新版本旧版本置 `SUPERSEDED` 只追加，监测记录旧结论不改写 |
 | `t_pest_trap_point` / `t_pest_point_move` | 展厅/库房诱捕点位（编号/布放日期/坐标/责任区域）与迁移记录（前后坐标只追加） |
 | `t_pest_trap_card` | 诱捕片：更换只置 `REPLACED`，旧片与旧监测记录永不删除 |
@@ -79,7 +79,9 @@
 | `GET  /api/relics/{id}` | 完整档案：档案 + 入藏照片 + 借还 + 项目 + 台账流水 |
 | `POST /api/relics/{id}/intake` | 入藏登记（照片/尺寸/库位，至少一张照片） |
 | `POST /api/relics/{id}/revoke` | 撤销（只改状态，记录保留） |
-| `POST /api/loans` / `POST /api/loans/{id}/return` | 借出 / 归还 |
+| `POST /api/loans` / `POST /api/loans/{id}/return` | 借出 / 归还（借展协议、借阅审批的贯通单只能由所属链路闭环，旧通道归还会被拒绝） |
+| `GET  /api/loans?relicId=&status=` | 外借清单（`status=LENT` 即当前在借清单），与 CSV 导出同一行集 |
+| `GET  /api/loans/export?relicId=&status=` | 外借清单 CSV 导出，与列表查询同一状态源同一顺序 |
 | `POST /api/repair-projects` | 修复立项（委托人、方案，项目编号唯一） |
 | `POST /api/repair-projects/{id}/start` | 开工 |
 | `POST /api/repair-projects/{id}/stages` | 登记阶段结果（可多次） |
@@ -318,6 +320,17 @@ mvn test
   漏项/多项/重复均拒绝；每行给 `INTACT 相符 / DAMAGED 损伤 / MISSING 缺失`，
   非相符行必须填差异说明；结论全部相符 `ALL_MATCH`，否则 `WITH_DIFF`，差异逐行永久保留；
   验收闭环后协议置 `RETURNED`，贯通借出记录同步归还。
+- **贯通单只能由所属链路闭环**：借展协议/借阅审批写出的贯通借出单，旧借出通道
+  （`POST /api/loans/{id}/return`）一律拒绝归还，防止协议在途而占用被提前释放、
+  验收闭环后文物仍滞留外借清单；验收闭环时找不到在借贯通单即状态源被破坏，直接报错暴露。
+- **归还验收并发与重复回执**：验收按协议行锁串行；同一验收单号重发/补传幂等回放同一
+  验收单（重复回执，不重复执行），不同单号的并发验收只有一单生效，其余业务拒绝。
+- **差异补录不重新打开已完成归还**：验收闭环后发现新的损伤/缺失，用
+  `POST /api/loan-agreements/{id}/return-check/diff-supplements` 只追加差异行
+  （`line_seq` 递增、补录单号唯一），结论由 `ALL_MATCH` 同步修正为 `WITH_DIFF`，
+  协议与贯通单保持 `RETURNED`，原验收比对行永不改写。
+- **外借清单同一状态源**：`GET /api/loans` 与 `GET /api/loans/export` 共用同一行集，
+  直接读 `t_relic_loan` 状态（无缓存），归还闭环即时从在借清单消失。
 - **修复侧反查**：`GET /api/loan-agreements/trace?projectId=` 由修复项目经文物反查借展原单，
   返回原单号、当前版本、借展方/保险金额/路线/归还日期、四节点处理人及**异常原因/解除人**、验收差异。
 - 协议登记/签署/变更、节点登记/异常/解除、归还验收全部追加写入 `t_relic_ledger` 留痕。
@@ -333,7 +346,8 @@ mvn test
 | `POST /api/loan-agreements/{id}/amend` | 协议变更，生成待签新版本（已签内容不覆盖） |
 | `POST /api/loan-agreements/{id}/escort-nodes` | 登记押运节点（封箱/交接/到馆/开箱；异常暂停、开箱双人见证） |
 | `POST /api/escort-nodes/{nodeId}/resolve` | 押运异常解除，后续节点恢复 |
-| `POST /api/loan-agreements/{id}/return-check` | 归还验收（与原清单逐项比对，差异保留） |
+| `POST /api/loan-agreements/{id}/return-check` | 归还验收（与原清单逐项比对，差异保留；同一验收单号重发幂等回放） |
+| `POST /api/loan-agreements/{id}/return-check/diff-supplements` | 归还验收差异补录（只追加差异行，不重新打开已完成归还） |
 | `GET  /api/loan-agreements/trace?projectId=` | 修复侧反查：原单、节点处理人、异常原因与验收差异 |
 
 ### 测试
@@ -343,6 +357,11 @@ mvn test
 开箱单人/同名见证人拒绝、两名不同见证人通过；归还验收漏项/多项拒绝、损伤与缺失差异逐行保留、
 贯通借出记录同步归还；修复项目反查定位原单与异常原因；在途期间修复开工与文物撤销被拦截；
 台账动作链完整可追溯。
+
+`LoanReturnCheckStateTest`（独立内存库）覆盖归还验收状态转换：贯通单旧通道归还被拦截、
+验收闭环后外借清单（`status=LENT`）不再列出且查询/CSV 导出行集一致；同一验收单号重发幂等回放
+（重复回执不重复执行）、不同单号并发 8 路只有一单生效；差异补录只追加、结论同步修正、
+协议与贯通单保持 `RETURNED` 不重开；借阅审批贯通单同样不能被旧通道归还。
 
 ## 文物库房库位与密集架预约（museum-7）
 
@@ -670,6 +689,10 @@ CONDITIONAL 必带合法等级、无借阅/已批准待出库 RECALL/已归还 S
 - **请求流水号幂等**：`request_no` 全表稀疏唯一。修复侧补传/补录/重试复用同一流水号，
   锁前快查、锁内二次回读，命中同一次尝试即回放原结果（生效回放业务结果，被拒回放
   原拒绝原因），绝不二次执行、绝不产生第二条尝试。
+- **输入缺项不属于并发冲突**：请求缺少关键字段或取值非法
+  （`InvalidRepairInputException`，如验收结论非 `PASS/CONDITIONAL`、附条件通过缺
+  验收后保护等级 `gradeAfter`）时，错误信息逐项指出缺项；不落 `REJECTED` 审计、
+  **不占用请求流水号**，补齐缺项后用同一流水号只重试当前步骤即可。
 
 ### 鉴定与并发接口
 
@@ -691,7 +714,8 @@ CONDITIONAL 必带合法等级、无借阅/已批准待出库 RECALL/已归还 S
 
 ### 测试
 
-`AppraisalOpinionTest`、`RepairOperationConcurrentTest`（各自独立内存库）覆盖：
+`AppraisalOpinionTest`、`RepairOperationConcurrentTest`、`RepairInputValidationTest`
+（各自独立内存库）覆盖：
 草稿非本人不可撤/撤回必填原因/撤回留痕不删档/撤回后不可再发布、已发布不可撤回、
 更正只能本人且追加不改原文；初鉴未发布不能复鉴、复鉴与初鉴一致直接定稿不仲裁、
 真/伪冲突进仲裁且两轮原文都保留、仲裁期间意见冻结、非指定仲裁人不可定稿、
@@ -699,7 +723,8 @@ CONDITIONAL 必带合法等级、无借阅/已批准待出库 RECALL/已归还 S
 附件、详细报告馆员被拒写 DENIED、专家放行写 GRANTED，两条审计都在且台账留痕；
 8 并发阶段登记全部生效阶段号 1..8、8 并发修复完成恰 1 生效 7 拒绝且被拒记录指向
 同一胜出尝试、7 条 `REPAIR_OP_REJECT` 台账均写明最终生效尝试、胜出流水号重放不二次执行、
-8 并发同一流水号开工只形成一条生效尝试。
+8 并发同一流水号开工只形成一条生效尝试；立项缺关键字段逐项指出缺项、
+验收缺 `gradeAfter`/结论非法不落 REJECTED 审计且不占用流水号、补齐后同一流水号重试当前步骤成功。
 
 ## 展览借品清点盘点（museum-12）
 

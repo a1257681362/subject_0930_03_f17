@@ -1303,12 +1303,28 @@ CREATE TABLE IF NOT EXISTS t_loan_return_check_line (
     qty              INT NOT NULL,
     result           VARCHAR(16) NOT NULL,
     diff_note        VARCHAR(500),
+    -- line_seq=0 为验收原始比对行；>0 为归还闭环后的差异补录行（只追加，不重开归还）
+    line_seq         INT NOT NULL DEFAULT 0,
+    supplement_no    VARCHAR(40),
+    supplemented_by  VARCHAR(64),
     create_by        BIGINT,
     create_time      TIMESTAMP,
-    CONSTRAINT uk_loan_return_check_line UNIQUE (check_id, manifest_line_id),
+    CONSTRAINT uk_loan_return_check_line UNIQUE (check_id, manifest_line_id, line_seq),
+    CONSTRAINT uk_loan_return_supplement_no UNIQUE (supplement_no),
     CONSTRAINT ck_loan_return_line_result CHECK (result IN ('INTACT', 'DAMAGED', 'MISSING'))
 );
 CREATE INDEX IF NOT EXISTS idx_loan_return_line_check ON t_loan_return_check_line (check_id);
+
+-- 差异补录旧库补列与约束迁移（新库 CREATE 已含，IF NOT EXISTS / DROP IF EXISTS 幂等跳过）
+ALTER TABLE t_loan_return_check_line ADD COLUMN IF NOT EXISTS line_seq INT NOT NULL DEFAULT 0;
+ALTER TABLE t_loan_return_check_line ADD COLUMN IF NOT EXISTS supplement_no VARCHAR(40);
+ALTER TABLE t_loan_return_check_line ADD COLUMN IF NOT EXISTS supplemented_by VARCHAR(64);
+ALTER TABLE t_loan_return_check_line DROP CONSTRAINT IF EXISTS uk_loan_return_check_line;
+ALTER TABLE t_loan_return_check_line ADD CONSTRAINT uk_loan_return_check_line
+    UNIQUE (check_id, manifest_line_id, line_seq);
+ALTER TABLE t_loan_return_check_line DROP CONSTRAINT IF EXISTS uk_loan_return_supplement_no;
+ALTER TABLE t_loan_return_check_line ADD CONSTRAINT uk_loan_return_supplement_no
+    UNIQUE (supplement_no);
 
 -- ========================================================================
 -- museum-8 虫害监测

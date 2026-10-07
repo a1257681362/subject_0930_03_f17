@@ -1,6 +1,7 @@
 package com.evops.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.evops.common.InvalidRepairInputException;
 import com.evops.dto.AcceptRequest;
 import com.evops.dto.ProjectCreateRequest;
 import com.evops.dto.StageRequest;
@@ -186,13 +187,18 @@ public class RepairService {
         String result = (req.getResult() == null || req.getResult().isEmpty())
                 ? ACCEPT_PASS : req.getResult();
         if (!ACCEPT_RESULTS.contains(result)) {
-            throw new IllegalArgumentException("验收结论只能为 PASS/CONDITIONAL");
+            throw new InvalidRepairInputException("验收结论只能为 PASS/CONDITIONAL，实际: " + result);
         }
         // museum-10：附条件通过（部分成功）必须登记验收后保护等级
         String gradeAfter = req.getGradeAfter() == null ? null : req.getGradeAfter().trim();
-        if (ACCEPT_CONDITIONAL.equals(result)
-                && (gradeAfter == null || !GRADES.contains(gradeAfter))) {
-            throw new IllegalArgumentException("验收附条件通过（部分成功）必须登记验收后保护等级 ONE/TWO/THREE");
+        if (ACCEPT_CONDITIONAL.equals(result) && gradeAfter == null) {
+            throw new InvalidRepairInputException("修复验收缺少关键字段：gradeAfter"
+                    + "（验收后保护等级），附条件通过（部分成功）必须登记 ONE/TWO/THREE；"
+                    + "补齐后用同一请求流水号重试当前验收步骤即可");
+        }
+        if (ACCEPT_CONDITIONAL.equals(result) && !GRADES.contains(gradeAfter)) {
+            throw new InvalidRepairInputException("验收后保护等级 gradeAfter 只能为 ONE/TWO/THREE，实际: "
+                    + gradeAfter);
         }
 
         LocalDateTime now = LocalDateTime.now();

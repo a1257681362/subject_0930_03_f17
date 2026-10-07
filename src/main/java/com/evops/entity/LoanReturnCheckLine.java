@@ -35,6 +35,15 @@ public class LoanReturnCheckLine {
     /** 差异说明（损伤/缺失时必填） */
     private String diffNote;
 
+    /** 行序：0=验收原始比对行；>0=归还闭环后的差异补录行（只追加，不重开归还） */
+    private Integer lineSeq;
+
+    /** 差异补录单号（仅补录行有值，全库唯一） */
+    private String supplementNo;
+
+    /** 差异补录人（仅补录行有值） */
+    private String supplementedBy;
+
     @TableField(fill = FieldFill.INSERT)
     private Long createBy;
 

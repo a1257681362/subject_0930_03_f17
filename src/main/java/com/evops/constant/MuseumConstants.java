@@ -223,6 +223,8 @@ public final class MuseumConstants {
     public static final String ACTION_ESCORT_ANOMALY = "ESCORT_ANOMALY";
     public static final String ACTION_ESCORT_RESUME = "ESCORT_RESUME";
     public static final String ACTION_LOAN_RETURN_CHECK = "LOAN_RETURN_CHECK";
+    /** 归还验收差异补录：只追加差异行，不重新打开已完成归还 */
+    public static final String ACTION_LOAN_RETURN_SUPPLEMENT = "LOAN_RETURN_SUPPLEMENT";
 
     // --------------------------------------------------------------------
     // museum-7 文物库房库位与密集架预约

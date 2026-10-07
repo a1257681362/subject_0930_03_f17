@@ -7,6 +7,7 @@ import com.evops.dto.AgreementSignRequest;
 import com.evops.dto.AnomalyResolveRequest;
 import com.evops.dto.EscortNodeRequest;
 import com.evops.dto.ReturnCheckRequest;
+import com.evops.dto.ReturnDiffSupplementRequest;
 import com.evops.entity.EscortNode;
 import com.evops.entity.LoanAgreement;
 import com.evops.entity.LoanAgreementVersion;
@@ -96,10 +97,18 @@ public class LoanAgreementController {
         return ApiResponse.ok(loanExhibitionService.resolveAnomaly(nodeId, request));
     }
 
-    /** 归还验收：与原借展清单逐项比对，差异逐行保留 */
+    /** 归还验收：与原借展清单逐项比对，差异保留；同一验收单号重发幂等回放 */
     @PostMapping("/loan-agreements/{id}/return-check")
     public ApiResponse<LoanReturnCheck> returnCheck(@PathVariable Long id,
                                                     @Valid @RequestBody ReturnCheckRequest request) {
         return ApiResponse.ok(loanExhibitionService.returnCheck(id, request));
+    }
+
+    /** 差异补录：验收闭环后只追加差异行，不重新打开已完成归还 */
+    @PostMapping("/loan-agreements/{id}/return-check/diff-supplements")
+    public ApiResponse<Map<String, Object>> supplementDiff(
+            @PathVariable Long id,
+            @Valid @RequestBody ReturnDiffSupplementRequest request) {
+        return ApiResponse.ok(loanExhibitionService.supplementDiff(id, request));
     }
 }
