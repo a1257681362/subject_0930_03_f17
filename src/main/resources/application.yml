@@ -1,0 +1,114 @@
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      force: true
+
+spring:
+  application:
+    name: evops-base
+  profiles:
+    active: dev
+  jackson:
+    time-zone: Asia/Shanghai
+    serialization:
+      write-dates-as-timestamps: false
+  datasource:
+    url: jdbc:h2:file:./data/evops;AUTO_SERVER=TRUE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  h2:
+    console:
+      enabled: false
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 100MB
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+# 文物多角度影像归档（museum-2）
+museum:
+  image:
+    # 内容寻址物理存储根目录（SHA-256 分桶），作废不删文件
+    storage-root: ./data/images
+    # 归档分辨率下限（像素），低于即逐张拒收
+    min-width-px: 800
+    min-height-px: 800
+  # 修复材料批号与用量核算（museum-3）
+  material:
+    # 计划/实际用量差异复核阈值（%），实际相对计划偏差严格超过该值触发复核
+    variance-threshold-pct: 20
+    # 差异复核定时扫描间隔（毫秒）；重启后启动即补扫一次，扫描按明细行幂等
+    review-scan-interval-ms: 60000
+    review-scan-on-startup: true
+  # 修复方案会签（museum-4）
+  countersign:
+    # 按文物风险（保存等级）配置馆内专家/外部专家/保管人员的会签顺序
+    sign-order:
+      ONE: EXTERNAL,INTERNAL,CUSTODIAN
+      TWO: INTERNAL,EXTERNAL,CUSTODIAN
+      THREE: INTERNAL,CUSTODIAN,EXTERNAL
+  # 展厅温湿度与照度巡检（museum-5）
+  env:
+    # 展厅文物材质在生效规则中无匹配条目时的兜底采样频率（分钟）
+    default-interval-min: 240
+    # 应用就绪后补生成到期巡检任务（重启场景），之后按固定间隔扫描
+    generate-on-startup: true
+    generate-interval-ms: 60000
+  # 文物库房库位与密集架预约（museum-7）
+  storage:
+    # 预约保留时长（分钟）：超时未开工自动释放（已开工 MOVING 不释放）
+    reservation-expire-minutes: 30
+    # 预约超时释放定时扫描间隔（毫秒）；重启后启动即补扫一次
+    expire-scan-interval-ms: 60000
+    expire-scan-on-startup: true
+  # 文物运输包装规格（museum-13）
+  packaging:
+    # 外部修复依赖装箱确认通知地址；留空表示依赖不可达：通知不假装成功，装箱单停留待确认
+    repair-notify-url: ""
+    repair-notify-timeout-ms: 3000
+    # 待送达通知补偿扫描间隔（毫秒）；恢复后行级认领补投，同一装箱单只通知一次
+    notify-scan-interval-ms: 300000
+    notify-scan-on-startup: true
+  # 文物保险估值（museum-15）
+  insurance:
+    # 估值过期提醒扫描间隔（毫秒）；重启后启动即补扫一次
+    # 提醒只提示续保/重新评估，不冻结借展归还（在借文物按签约快照履约）
+    remind-scan-interval-ms: 60000
+    remind-scan-on-startup: true
+  # 文物修复年度报表（museum-16）
+  annual-report:
+    # Quartz 年度生成 cron（留空不注册定时触发器，仍可用 /api/annual-reports/generate 手动生成；
+    # 如每年 1 月 5 日 02:00 生成上一年度报表：0 0 2 5 1 ?）
+    cron: ""
+  # 修复成果验收与开放标记（museum-14）
+  acceptance:
+    # 验收清单模板：按 材质+工艺 精确匹配；未命中时回落 材质+*，再回落 *+* 默认模板
+    checklist:
+      - material: "*"
+        craft: "*"
+        items: 修复部位与方案记录一致,修复材料批号与用量已核销,影像档案完整（修复前后对照）
+      - material: "青铜"
+        craft: "清洗"
+        items: 表面无清洗剂残留,纹饰无新增损伤,缓蚀封护完成,影像档案完整（修复前后对照）
+      - material: "青铜"
+        craft: "*"
+        items: 表面处理后稳定性合格,纹饰无新增损伤,影像档案完整（修复前后对照）
+      - material: "书画"
+        craft: "*"
+        items: 画心平整无新增折痕,补纸色差在允许范围,影像档案完整（修复前后对照）
+
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-aliases-package: com.evops
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.evops: INFO
